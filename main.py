@@ -4,8 +4,57 @@ import os
 import shutil
 import stat
 
+# Python version check
+MIN_PYTHON = (3, 11)
+print(f"Bot running Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+
+if sys.version_info < MIN_PYTHON:
+    print(f"ERROR: Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ is required.")
+    print("\nTo upgrade Python:")
+
+    if sys.platform == "win32":
+        print("  1. Download Python 3.13 or newer from: https://www.python.org/downloads/")
+        print("  2. Run the installer (check 'Add Python to PATH' during installation)")
+        print("  3. Delete the 'bot_venv' folder in your bot directory")
+        print("  4. Run the bot again")
+    elif os.path.exists("/.dockerenv"):
+        print("  Update your Dockerfile to use a newer Python base image, such as:")
+        print("    FROM python:3.12.12-slim-bookworm")
+        print("  Then rebuild your container")
+    elif os.path.exists("/var/run/secrets/kubernetes.io"):
+        print("  Update your container image to use Python 3.11 or newer.")
+    else:
+        print("  1. Install Python 3.13 using pyenv:")
+        print("       pyenv install 3.13")
+        print("       pyenv local 3.13")
+        print("  2. Delete the 'bot_venv' folder in your bot directory")
+        print("  3. Run the bot again")
+
+    sys.exit(1)
+
 def is_container() -> bool:
-    return os.path.exists("/.dockerenv") or os.path.exists("/var/run/secrets/kubernetes.io")
+    # Docker, Kubernetes, Podman - simple marker file checks
+    marker_files = ["/.dockerenv", "/var/run/secrets/kubernetes.io", "/run/.containerenv"]
+    if any(os.path.exists(path) for path in marker_files):
+        return True
+
+    # LXC - check init process environment
+    try:
+        with open("/proc/1/environ", "r") as f:
+            if "container=lxc" in f.read():
+                return True
+    except (IOError, OSError):
+        pass
+
+    # Systemd-nspawn - check container type file
+    try:
+        with open("/run/systemd/container", "r") as f:
+            if f.read() == "systemd-nspawn\n":
+                return True
+    except (IOError, OSError):
+        pass
+
+    return False
 
 def is_ci_environment() -> bool:
     """Check if running in a CI environment"""
@@ -429,10 +478,21 @@ def download_requirements_from_release(beta_mode=False):
         print(f"Error downloading requirements.txt: {e}")
         return False
 
+def _import_onnxruntime_quietly():
+    """Import onnxruntime while suppressing C++ GPU discovery warning."""
+    # Redirect fd 2 (C-level stderr) since ONNX writes there, not to sys.stderr
+    _fd, _null = sys.stderr.fileno(), os.open(os.devnull, os.O_WRONLY)
+    _bak = os.dup(_fd); os.dup2(_null, _fd); os.close(_null)
+    try:
+        import onnxruntime
+        return onnxruntime
+    finally:
+        os.dup2(_bak, _fd); os.close(_bak)
+
 def is_onnxruntime_nightly():
     """Check if installed onnxruntime is a nightly build."""
     try:
-        import onnxruntime
+        onnxruntime = _import_onnxruntime_quietly()
         version = onnxruntime.__version__
         # Nightly versions contain 'dev' or '+' (e.g., "1.20.0.dev20251115001")
         return "dev" in version or "+" in version
@@ -497,7 +557,7 @@ def check_and_install_requirements():
             elif package_name.lower() == "numpy":
                 import numpy
             elif package_name.lower() == "onnxruntime":
-                import onnxruntime
+                _import_onnxruntime_quietly()
                 # Check if we need to switch versions based on Python version
                 if sys.version_info >= (3, 14) and not is_onnxruntime_nightly():
                     # Has stable but needs nightly - mark for reinstall
@@ -544,7 +604,7 @@ def check_and_install_requirements():
 
 def setup_dependencies(beta_mode=False):
     """Main function to set up all dependencies."""
-    print("\nChecking dependencies...")
+    print("Checking dependencies...")
     
     removed_obsolete = False
     if has_obsolete_requirements():
@@ -588,6 +648,7 @@ F = Fore
 R = Style.RESET_ALL
 
 import warnings
+import aiohttp
 
 def check_vcredist():
     """Check if Visual C++ Redistributable is installed on Windows."""
@@ -1086,7 +1147,7 @@ if __name__ == "__main__":
     create_tables()
 
     async def load_cogs():
-        cogs = ["olddb", "control", "alliance", "alliance_member_operations", "bot_operations", "logsystem", "support_operations", "gift_operations", "changes", "w", "wel", "other_features", "bear_trap", "bear_trap_schedule", "id_channel", "backup_operations", "bear_trap_editor", "bear_trap_templates", "bear_trap_wizard", "attendance", "attendance_report", "minister_schedule", "minister_menu", "minister_archive", "registration"]
+        cogs = ["pimp_my_bot", "olddb", "control", "alliance", "alliance_member_operations", "bot_operations", "logsystem", "support_operations", "gift_operations", "changes", "w", "wel", "other_features", "bear_trap", "bear_trap_schedule", "id_channel", "backup_operations", "bear_trap_editor", "bear_trap_templates", "bear_trap_wizard", "attendance", "attendance_report", "minister_schedule", "minister_menu", "minister_archive", "registration"]
 
         failed_cogs = []
         
@@ -1115,59 +1176,141 @@ if __name__ == "__main__":
 
     async def main():
         await load_cogs()
-        await bot.start(bot_token)
+
+        while True:
+            try:
+                await bot.start(bot_token)
+                break  # Clean exit if bot.start() returns normally
+
+            except discord.LoginFailure:
+                print(f"\n{F.RED}Login failed: Invalid bot token!{R}")
+                print(f"{F.YELLOW}Ensure your bot_token.txt file contains the proper token.{R}")
+                print(f"{F.YELLOW}If necessary, you can reset it via steps 3-4 here:{R}")
+                print(f"{F.YELLOW}https://github.com/whiteout-project/bot/wiki/Creating-a-Discord-Application{R}")
+                break
+
+            except discord.PrivilegedIntentsRequired:
+                print(f"\n{F.RED}Login failed: Privileged intents not enabled.{R}")
+                print(f"{F.YELLOW}Follow steps 5 onwards to enable the required intents:{R}")
+                print(f"{F.YELLOW}https://github.com/whiteout-project/bot/wiki/Creating-a-Discord-Application{R}")
+                break
+
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    print(f"\n{F.YELLOW}Rate limited by Discord (HTTP 429).{R}")
+                    print(f"{F.YELLOW}This often happens on shared nodes with many Discord bots.{R}")
+                    print(f"{F.YELLOW}Possible solutions:{R}")
+                    print(f"{F.YELLOW}  - Just wait it out and retry (retrying in 60 seconds){R}")
+                    print(f"{F.YELLOW}  - If hosted on a VPS, move your bot to a different node{R}")
+                    print(f"{F.YELLOW}  - Use a different hosting provider (last resort){R}")
+                    await asyncio.sleep(60)
+                elif e.status >= 500:
+                    print(f"\n{F.YELLOW}Discord server error (HTTP {e.status}).{R}")
+                    print(f"{F.YELLOW}Discord may be experiencing issues. Retrying in 30 seconds...{R}")
+                    await asyncio.sleep(30)
+                else:
+                    print(f"\n{F.RED}Discord HTTP error (HTTP {e.status}): {e.text}{R}")
+                    print(f"{F.YELLOW}Retrying in 30 seconds...{R}")
+                    await asyncio.sleep(30)
+
+            except discord.GatewayNotFound:
+                print(f"\n{F.YELLOW}Discord gateway unavailable.{R}")
+                print(f"{F.YELLOW}Discord may be experiencing issues. Retrying in 30 seconds...{R}")
+                await asyncio.sleep(30)
+
+            except (aiohttp.ClientConnectorDNSError, aiohttp.ClientConnectorError):
+                print(f"\n{F.YELLOW}Connection issue: Unable to reach Discord servers.{R}")
+                print(f"{F.YELLOW}Possible causes:{R}")
+                print(f"{F.YELLOW}  - Internet connection is down{R}")
+                print(f"{F.YELLOW}  - DNS resolution failed{R}")
+                print(f"{F.YELLOW}  - Discord is blocked by firewall/ISP{R}")
+                print(f"{F.YELLOW}  - VPS network issues{R}")
+                print(f"{F.YELLOW}Retrying in 30 seconds...{R}")
+                await asyncio.sleep(30)
+
+            except OSError as e:
+                if e.errno in (-3, 11001):  # DNS errors (Linux/Windows)
+                    print(f"\n{F.YELLOW}Connection issue: DNS resolution failed.{R}")
+                    print(f"{F.YELLOW}Check your DNS settings or try different DNS servers.{R}")
+                    print(f"{F.YELLOW}Retrying in 30 seconds...{R}")
+                    await asyncio.sleep(30)
+                else:
+                    raise
 
     def run_bot():
         import signal
 
-        shutdown_messages = [
-            "🛑 Ctrl+C detected! The bot is powering down... beep boop!",
-            "👋 Caught Ctrl+C! Time for the bot to take a nap. Sweet dreams!",
-            "🔌 Ctrl+C pressed! Unplugging the bot. See you next time!",
-            "🚪 Exit signal received! The bot has left the building...",
-            "💤 Ctrl+C! The bot is going to sleep. Wake me up when you need me!",
-            "🎬 And that's a wrap! Bot shutting down gracefully.",
-            "🌙 Trying to turn the bot off and not on again. Ctrl+C ya later!",
-            "✨ Ctrl+C and poof! The bot vanishes into thin air...",
-        ]
-
         def get_shutdown_message():
             import random
+            try:
+                from cogs.pimp_my_bot import theme
+                shutdown_messages = [
+                    f"{theme.shutdownStopIcon} Ctrl+C detected! The bot is powering down... beep boop!",
+                    f"{theme.shutdownHandIcon} Caught Ctrl+C! Time for the bot to take a nap. Sweet dreams!",
+                    f"{theme.shutdownPlugIcon} Ctrl+C pressed! Unplugging the bot. See you next time!",
+                    f"{theme.shutdownDoorIcon} Exit signal received! The bot has left the building...",
+                    f"{theme.shutdownZzzIcon} Ctrl+C! The bot is going to sleep. Wake me up when you need me!",
+                    f"{theme.shutdownClapperIcon} And that's a wrap! Bot shutting down gracefully.",
+                    f"{theme.shutdownMoonIcon} Trying to turn the bot off and not on again. Ctrl+C ya later!",
+                    f"{theme.shutdownSparkleIcon} Ctrl+C and poof! The bot vanishes into thin air...",
+                ]
+            except Exception:
+                # Fallback if theme not loaded yet
+                shutdown_messages = [
+                    "🛑 Ctrl+C detected! The bot is powering down... beep boop!",
+                    "👋 Caught Ctrl+C! Time for the bot to take a nap. Sweet dreams!",
+                ]
             return random.choice(shutdown_messages)
 
-        def handle_signal(signum, frame):
-            """Handle shutdown signals (Ctrl+C or container stop)."""
-            signal_name = "Ctrl+C" if signum == signal.SIGINT else "SIGTERM"
+        async def start_bot():
+            """Start the bot with proper shutdown handling."""
+            stop_event = asyncio.Event()
 
-            if is_container():
-                print(f"\n{F.YELLOW}Received {signal_name}. Shutting down gracefully...{R}")
+            def signal_handler():
+                if is_container():
+                    print(f"\n{F.YELLOW}Received shutdown signal. Shutting down gracefully...{R}")
+                else:
+                    print(f"\n{F.YELLOW}{get_shutdown_message()}{R}")
+                stop_event.set()
+
+            loop = asyncio.get_running_loop()
+
+            # Register signal handlers
+            if sys.platform != "win32":
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.add_signal_handler(sig, signal_handler)
             else:
-                print(f"\n{F.YELLOW}{get_shutdown_message()}{R}")
+                # Windows doesn't support add_signal_handler, use traditional signal
+                def win_handler(signum, frame):
+                    signal_handler()
+                signal.signal(signal.SIGINT, win_handler)
 
-            # Schedule graceful shutdown - bot.close() will cause bot.start() to return
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(bot.close())
-            except RuntimeError:
-                pass  # No running loop, just exit
+            # Start bot in background task
+            bot_task = asyncio.create_task(main())
 
-            # Raise SystemExit to cleanly exit
-            raise SystemExit(0)
+            # Wait for either bot to finish or shutdown signal
+            shutdown_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait(
+                [bot_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
 
-        # Register signal handler for SIGINT (Ctrl+C)
-        signal.signal(signal.SIGINT, handle_signal)
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
-        # Also handle SIGTERM on Linux for graceful container stops
-        if sys.platform != "win32":
-            signal.signal(signal.SIGTERM, handle_signal)
+            # Properly close the bot and await completion
+            if not bot.is_closed():
+                await bot.close()
 
         try:
-            asyncio.run(main())
-        except SystemExit:
-            pass  # Clean exit from signal handler
+            asyncio.run(start_bot())
         except KeyboardInterrupt:
-            # Fallback in case signal handler doesn't catch it
-            print(f"\n{F.YELLOW}{get_shutdown_message()}{R}")
+            pass  # Already handled by signal handler
 
     if __name__ == "__main__":
         run_bot()
